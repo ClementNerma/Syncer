@@ -1,0 +1,10 @@
+[package]
+name = "syncer-common"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.71"
+serde = { version = "1.0.160", features = ["derive"] }
+tokio = "1.28.0"
+walkdir = "2.3.3"

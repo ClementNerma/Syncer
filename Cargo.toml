@@ -1,0 +1,2 @@
+[workspace]
+members = ["syncer-client", "syncer-server", "syncer-common"]
