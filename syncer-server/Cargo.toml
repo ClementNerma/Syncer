@@ -9,6 +9,7 @@ axum = { version = "0.6.17", default-features = false, features = [
     "http1",
     "tokio",
     "json",
+    "query"
 ] }
 clap = { version = "4.2.5", features = ["derive"] }
 futures-util = "0.3.28"
@@ -23,3 +24,4 @@ tower-http = { version = "0.4.0", features = ["cors", "trace"] }
 tracing = "0.1.37"
 tracing-subscriber = { version = "0.3.17", features = ["std", "fmt"] }
 syncer-common = { path = "../syncer-common" }
+serde = { version = "1.0.160", features = ["derive"] }
