@@ -42,7 +42,7 @@ pub async fn serve(addr: &SocketAddr, data_dir: PathBuf) -> Result<()> {
         .route("/fs/file/write", put(write_file))
         .route("/fs/file/delete", delete(remove_file))
         .route("/fs/dir/create", put(create_dir))
-        .route("/fs/dir/remove", delete(remove_dir))
+        .route("/fs/dir/delete", delete(remove_dir))
         .with_state(Arc::new(RwLock::new(state)))
         .layer(TraceLayer::new_for_http())
         .layer(cors);

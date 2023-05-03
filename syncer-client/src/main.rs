@@ -6,22 +6,24 @@ mod cmd;
 mod diffing;
 mod logging;
 
-use std::{future::Future, sync::atomic::Ordering, time::Duration};
+use std::{error, future::Future, sync::atomic::Ordering, time::Duration};
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
 use cmd::Args;
 use colored::Colorize;
 use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
-use reqwest::Url;
+use reqwest::{Client, Url};
 use syncer_common::{
-    snapshot::{make_snapshot, Snapshot, SnapshotItemMetadata},
+    snapshot::{make_snapshot, Snapshot, SnapshotFileMetadata, SnapshotItemMetadata},
     PING_ANSWER,
 };
 use tokio::join;
 
 use crate::{
-    diffing::{build_diff, Diff},
+    diffing::{
+        build_diff, Diff, DiffItemAdded, DiffItemDeleted, DiffItemModified, DiffItemTypeChanged,
+    },
     logging::PRINT_DEBUG_MESSAGES,
 };
 
@@ -80,7 +82,7 @@ async fn inner_main() -> Result<()> {
 
     let (local, remote) = join!(
         async_with_spinner(local_pb, |pb| make_snapshot(data_dir.clone(), pb)),
-        async_with_spinner(remote_pb, |_| build_remote_snapshot(url))
+        async_with_spinner(remote_pb, |_| build_remote_snapshot(url.clone()))
     );
 
     let local = local.context("Failed to build local snapshot")?;
@@ -178,30 +180,142 @@ async fn inner_main() -> Result<()> {
         info!("");
     }
 
-    let transfer_count = added.len() + modified.len() + type_changed.len();
-    let delete_count = type_changed.len() + deleted.len();
-    let transfer_size = added.iter().fold(0, |acc, (_, i)| {
-        acc + match i.new {
-            SnapshotItemMetadata::Directory => 0,
-            SnapshotItemMetadata::File(mt) => mt.size,
-        }
-    }) + modified.iter().fold(0, |acc, (_, i)| acc + i.new.size)
-        + type_changed.iter().fold(0, |acc, (_, i)| {
-            acc + match i.new {
-                SnapshotItemMetadata::Directory => 0,
-                SnapshotItemMetadata::File(mt) => mt.size,
-            }
-        });
+    let to_create_dirs =
+        added
+            .iter()
+            .filter_map(|(path, DiffItemAdded { new })| match new {
+                SnapshotItemMetadata::Directory => Some(path),
+                SnapshotItemMetadata::File(_) => None,
+            })
+            .chain(type_changed.iter().filter_map(
+                |(path, DiffItemTypeChanged { prev: _, new })| match new {
+                    SnapshotItemMetadata::Directory => Some(path),
+                    SnapshotItemMetadata::File(_) => None,
+                },
+            ))
+            .collect::<Vec<_>>();
+
+    let to_transfer =
+        added
+            .iter()
+            .filter_map(|(path, DiffItemAdded { new })| match new {
+                SnapshotItemMetadata::Directory => None,
+                SnapshotItemMetadata::File(mt) => Some((path, mt)),
+            })
+            .chain(
+                modified
+                    .iter()
+                    .map(|(path, DiffItemModified { prev: _, new })| (path, new)),
+            )
+            .chain(type_changed.iter().filter_map(
+                |(path, DiffItemTypeChanged { prev: _, new })| match new {
+                    SnapshotItemMetadata::Directory => None,
+                    SnapshotItemMetadata::File(mt) => Some((path, mt)),
+                },
+            ))
+            .collect::<Vec<_>>();
+
+    let to_delete = deleted
+        .iter()
+        .map(|(path, DiffItemDeleted { prev })| (path, prev))
+        .chain(
+            type_changed
+                .iter()
+                .map(|(path, DiffItemTypeChanged { prev, new: _ })| (path, prev)),
+        )
+        .collect::<Vec<_>>();
 
     info!(
-        "Found a total of {} items to transfer and {} to delete for a total of {}.",
-        transfer_count.to_string().bright_green(),
-        delete_count.to_string().bright_red(),
-        format!("{}", HumanBytes(transfer_size)).bright_yellow()
+        "Found a total of {} files (+ {} dirs) to transfer and {} to delete for a total of {}.",
+        to_transfer.len().to_string().bright_green(),
+        to_create_dirs.len().to_string().bright_green(),
+        to_delete.len().to_string().bright_red(),
+        format!(
+            "{}",
+            HumanBytes(to_transfer.iter().map(|(_, mt)| mt.size).sum())
+        )
+        .bright_yellow()
     );
 
     // TODO: actual transfer :p
 
+    // added
+    // modified
+    // type_changed
+    // deleted
+
+    let mut errors = vec![];
+
+    let mp = MultiProgress::new();
+
+    let delete_pb = mp.add(ProgressBar::new(to_delete.len() as u64));
+    let create_dirs_pb = mp.add(ProgressBar::new(to_create_dirs.len() as u64));
+    let transfer_pb = mp.add(ProgressBar::new(to_transfer.len() as u64));
+
+    for (path, item) in &to_delete {
+        let uri_item_type = match item {
+            SnapshotItemMetadata::Directory => "dir",
+            SnapshotItemMetadata::File(_) => "file",
+        };
+
+        let req = Client::new()
+            .delete(&format!("{url}/fs/{uri_item_type}/delete",))
+            .query(&[("path", path)]);
+
+        if let Err(err) = req.send().await {
+            errors.push(format!("Failed to delete file '{path}': {err}"));
+        }
+
+        delete_pb.inc(1);
+    }
+
+    for path in &to_create_dirs {
+        let req = Client::new()
+            .put(&format!("{url}/fs/dir/create"))
+            .query(&[("path", path)]);
+
+        if let Err(err) = req.send().await {
+            errors.push(format!("Failed to create directory '{path}': {err}"));
+        }
+
+        create_dirs_pb.inc(1);
+    }
+
+    for (
+        path,
+        SnapshotFileMetadata {
+            last_modif_date,
+            last_modif_date_ns,
+            size,
+        },
+    ) in &to_transfer
+    {
+        let req = Client::new()
+            .put(&format!("{url}/fs/file/write"))
+            .query(&[("path", path)]);
+
+        if let Err(err) = req.send().await {
+            errors.push(format!("Failed to transfer file '{path}': {err}"));
+        }
+
+        transfer_pb.inc(1);
+
+        // TODO: handle last_modif_date, last_modif_date_ns, and size
+        // used by the server to assert everything is valid + write timestamps
+    }
+
+    if !errors.is_empty() {
+        bail!(
+            "{} error(s) occurred:\n{}",
+            errors.len(),
+            errors
+                .iter()
+                .map(|err| format!("\n* {err}"))
+                .collect::<String>()
+        );
+    }
+
+    success!("Synchronized successfully.");
     Ok(())
 }
 
