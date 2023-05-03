@@ -114,6 +114,10 @@ pub async fn write_file(
             .map_err(handle_err!(INTERNAL_SERVER_ERROR))?;
     }
 
+    // TODO: check that size is correct (else remove file)
+    // TODO: write to temporary file (in current filesystem to avoid out of space) before moving to final location
+    // TODO: check if mtime has been correctly written
+
     tokio::task::spawn_blocking(move || {
         filetime::set_file_mtime(
             path,
