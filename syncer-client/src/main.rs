@@ -254,32 +254,40 @@ async fn inner_main() -> Result<()> {
             .with_message("Running..."),
     );
 
-    let pb_style =
-        ProgressStyle::with_template("[{elapsed_precise}] {prefix} {bar:40} {pos}/{len} {msg}")
-            .unwrap();
-
     let delete_pb = mp.add(
-        ProgressBar::new(to_delete.len() as u64)
-            .with_style(pb_style.clone())
-            .with_prefix("Deleting     :"),
+        ProgressBar::new(to_delete.len() as u64).with_style(
+            ProgressStyle::with_template(
+                "Deleting     : [{elapsed_precise}] {prefix} {bar:40} {pos}/{len} items",
+            )
+            .unwrap(),
+        ),
     );
 
     let create_dirs_pb = mp.add(
-        ProgressBar::new(to_create_dirs.len() as u64)
-            .with_style(pb_style.clone())
-            .with_prefix("Creating dirs:"),
+        ProgressBar::new(to_create_dirs.len() as u64).with_style(
+            ProgressStyle::with_template(
+                "Creating     : [{elapsed_precise}] {prefix} {bar:40} {pos}/{len} directories",
+            )
+            .unwrap(),
+        ),
     );
 
     let transfer_pb = mp.add(
-        ProgressBar::new(to_transfer.len() as u64)
-            .with_style(pb_style.clone())
-            .with_prefix("Transferring :"),
+        ProgressBar::new(to_transfer.len() as u64).with_style(
+            ProgressStyle::with_template(
+                "Transferring : [{elapsed_precise}] {prefix} {bar:40} {pos}/{len} files",
+            )
+            .unwrap(),
+        ),
     );
 
     let transfer_size_pb = mp.add(
-        ProgressBar::new(transfer_size as u64)
-            .with_style(pb_style.clone())
-            .with_prefix("Transfer size:"),
+        ProgressBar::new(transfer_size as u64).with_style(
+            ProgressStyle::with_template(
+                "Transfer size: [{elapsed_precise}] {prefix} {bar:40} {bytes}/{total_bytes}",
+            )
+            .unwrap(),
+        ),
     );
 
     let mut errors = vec![];
@@ -372,8 +380,8 @@ async fn inner_main() -> Result<()> {
                 let req = Client::new()
                     .post(url.join("/fs/file/write")?)
                     .query(&[("path", path)])
-                    .query(&[("last_modif_date", last_modif_date)])
-                    .query(&[("last_modif_date_ns", last_modif_date_ns)])
+                    .query(&[("last_modification", last_modif_date)])
+                    .query(&[("last_modification_ns", last_modif_date_ns)])
                     .query(&[("size", size)])
                     .body(file_body);
 
