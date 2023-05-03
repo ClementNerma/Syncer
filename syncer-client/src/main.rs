@@ -65,6 +65,12 @@ async fn inner_main() -> Result<()> {
         bail!("Provided data directory was not found");
     }
 
+    // ======================================================= //
+    // =
+    // = Ping the server
+    // =
+    // ======================================================= //
+
     debug!("Pinging server...");
 
     let url = Url::parse(&address).context("Failed to parse provided server address")?;
@@ -81,6 +87,12 @@ async fn inner_main() -> Result<()> {
     }
 
     debug!("Server answered ping request correctly '{PING_ANSWER}'");
+
+    // ======================================================= //
+    // =
+    // = Build local and remote snapshots
+    // =
+    // ======================================================= //
 
     info!("Building snapshots...");
 
@@ -100,6 +112,12 @@ async fn inner_main() -> Result<()> {
 
     let local = local.context("Failed to build local snapshot")?;
     let remote = remote.context("Failed to build remote snapshot")?;
+
+    // ======================================================= //
+    // =
+    // = Perform snapshots diffing and display
+    // =
+    // ======================================================= //
 
     info!("Diffing...");
 
@@ -193,6 +211,12 @@ async fn inner_main() -> Result<()> {
         info!("");
     }
 
+    // ======================================================= //
+    // =
+    // = Categorize operations to perform
+    // =
+    // ======================================================= //
+
     let to_create_dirs =
         added
             .iter()
@@ -257,6 +281,12 @@ async fn inner_main() -> Result<()> {
         std::process::exit(1);
     }
 
+    // ======================================================= //
+    // =
+    // = Prepare the progress bars for transfer
+    // =
+    // ======================================================= //
+
     let mp = MultiProgress::new();
 
     let pb_msg = Arc::new(RwLock::new(
@@ -267,14 +297,16 @@ async fn inner_main() -> Result<()> {
         ),
     ));
 
-    let delete_pb = mp.add(
-        ProgressBar::new(to_delete.len() as u64).with_style(
-            ProgressStyle::with_template(
-                "Deleting     : [{elapsed_precise}] {prefix} {bar:40} {pos}/{len} items",
-            )
-            .unwrap(),
+    let delete_pb = Arc::new(RwLock::new(
+        mp.add(
+            ProgressBar::new(to_delete.len() as u64).with_style(
+                ProgressStyle::with_template(
+                    "Deleting     : [{elapsed_precise}] {prefix} {bar:40} {pos}/{len} items",
+                )
+                .unwrap(),
+            ),
         ),
-    );
+    ));
 
     let create_dirs_pb = Arc::new(RwLock::new(
         mp.add(
@@ -329,55 +361,80 @@ async fn inner_main() -> Result<()> {
         }}
     }
 
-    for (path, item) in &to_delete {
+    // ======================================================= //
+    // =
+    // = Delete items
+    // =
+    // ======================================================= //
+
+    let mut task_pool = JoinSet::new();
+
+    for (path, item) in to_delete {
+        let path = String::clone(&path);
+        let item = item.clone();
+
+        let errors = Arc::clone(&errors);
+        let pb_msg = Arc::clone(&pb_msg);
+        let delete_pb = Arc::clone(&delete_pb);
+
         let uri_item_type = match item {
             SnapshotItemMetadata::Directory => "dir",
             SnapshotItemMetadata::File(_) => "file",
         };
 
         let req = Client::new()
-            .delete(url.join(&format!("/fs/{uri_item_type}/delete"))?)
-            .query(&[("path", path)]);
+            .delete(url.join(&format!("/fs/{uri_item_type}/delete")).unwrap())
+            .query(&[("path", &path)]);
 
-        match req.send().await {
-            Ok(data) => {
-                if let Err(err) = data.error_for_status() {
+        task_pool.spawn(async move {
+            match req.send().await {
+                Ok(data) => {
+                    if let Err(err) = data.error_for_status() {
+                        report_err!(
+                            format!("Failed to delete item at '{path}': {err}"),
+                            errors,
+                            pb_msg
+                        );
+                    }
+                }
+
+                Err(err) => {
                     report_err!(
-                        format!("Failed to delete item at '{path}': {err}"),
+                        format!("Failed to send deletion request for item '{path}': {err}"),
                         errors,
                         pb_msg
                     );
                 }
             }
 
-            Err(err) => {
-                report_err!(
-                    format!("Failed to send deletion request for item '{path}': {err}"),
-                    errors,
-                    pb_msg
-                );
-            }
-        }
-
-        delete_pb.inc(1);
+            delete_pb.read().await.inc(1);
+        });
     }
 
-    // delete_pb.finish();
+    while let Some(result) = task_pool.join_next().await {
+        result?;
+    }
+
+    // ======================================================= //
+    // =
+    // = Create directories
+    // =
+    // ======================================================= //
 
     let mut task_pool = JoinSet::new();
 
     for path in &to_create_dirs {
-        let url = url.clone();
         let path = String::clone(path);
+
         let errors = Arc::clone(&errors);
         let pb_msg = Arc::clone(&pb_msg);
         let create_dirs_pb = Arc::clone(&create_dirs_pb);
 
-        task_pool.spawn(async move {
-            let req = Client::new()
-                .post(url.join(&format!("/fs/dir/create")).unwrap())
-                .query(&[("path", &path)]);
+        let req = Client::new()
+            .post(url.join(&format!("/fs/dir/create")).unwrap())
+            .query(&[("path", &path)]);
 
+        task_pool.spawn(async move {
             match req.send().await {
                 Ok(data) => {
                     if let Err(err) = data.error_for_status() {
@@ -406,7 +463,11 @@ async fn inner_main() -> Result<()> {
         result?;
     }
 
-    // create_dirs_pb.read().await.finish();
+    // ======================================================= //
+    // =
+    // = Transfer files
+    // =
+    // ======================================================= //
 
     let mut task_pool = JoinSet::new();
 
@@ -424,42 +485,45 @@ async fn inner_main() -> Result<()> {
         }
 
         let data_dir = data_dir.clone();
-        let url = url.clone();
+
         let errors = Arc::clone(&errors);
         let pb_msg = Arc::clone(&pb_msg);
-        let transfer_pb = Arc::clone(&transfer_pb);
         let transfer_size_pb = Arc::clone(&transfer_size_pb);
 
-        task_pool.spawn(async move {
-            match File::open(data_dir.join(&path)).await {
-                Err(err) => report_err!(
+        transfer_pb.read().await.inc(1);
+
+        match File::open(data_dir.join(&path)).await {
+            Err(err) => {
+                report_err!(
                     format!("Failed to open file '{path}' for transfer: {err}"),
                     errors,
                     pb_msg
-                ),
+                );
+            }
 
-                Ok(file) => {
-                    let transfer_size_pb = transfer_size_pb.clone();
+            Ok(file) => {
+                let transfer_size_pb = transfer_size_pb.clone();
 
-                    let stream = BytesCodec::new().framed(file).inspect_ok(move |chunk| {
-                        let size = chunk.len() as u64;
-                        let transfer_size_pb = Arc::clone(&transfer_size_pb);
+                let stream = BytesCodec::new().framed(file).inspect_ok(move |chunk| {
+                    let size = chunk.len() as u64;
+                    let transfer_size_pb = Arc::clone(&transfer_size_pb);
 
-                        tokio::spawn(async move {
-                            transfer_size_pb.read().await.inc(size);
-                        });
+                    tokio::spawn(async move {
+                        transfer_size_pb.read().await.inc(size);
                     });
+                });
 
-                    let file_body = Body::wrap_stream(stream);
+                let file_body = Body::wrap_stream(stream);
 
-                    let req = Client::new()
-                        .post(url.join("/fs/file/write").unwrap())
-                        .query(&[("path", &path)])
-                        .query(&[("last_modification", last_modif_date)])
-                        .query(&[("last_modification_ns", last_modif_date_ns)])
-                        .query(&[("size", size)])
-                        .body(file_body);
+                let req = Client::new()
+                    .post(url.join("/fs/file/write").unwrap())
+                    .query(&[("path", &path)])
+                    .query(&[("last_modification", last_modif_date)])
+                    .query(&[("last_modification_ns", last_modif_date_ns)])
+                    .query(&[("size", size)])
+                    .body(file_body);
 
+                task_pool.spawn(async move {
                     match req.send().await {
                         Ok(data) => {
                             if let Err(err) = data.error_for_status() {
@@ -479,19 +543,20 @@ async fn inner_main() -> Result<()> {
                             );
                         }
                     }
-                }
+                });
             }
-
-            transfer_pb.read().await.inc(1);
-        });
+        }
     }
 
     while let Some(result) = task_pool.join_next().await {
         result?;
     }
 
-    // transfer_pb.read().await.finish();
-    // transfer_size_pb.read().await.finish();
+    // ======================================================= //
+    // =
+    // = Done!
+    // =
+    // ======================================================= //
 
     let errors = errors.lock().await;
 
