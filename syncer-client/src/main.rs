@@ -27,9 +27,9 @@ use syncer_common::{
 use time::OffsetDateTime;
 use tokio::{
     fs::File,
-    join,
     sync::{Mutex, RwLock},
     task::JoinSet,
+    try_join,
 };
 use tokio_util::codec::{BytesCodec, Decoder};
 
@@ -106,13 +106,10 @@ async fn inner_main() -> Result<()> {
     local_pb.enable_steady_tick(Duration::from_millis(150));
     remote_pb.enable_steady_tick(Duration::from_millis(150));
 
-    let (local, remote) = join!(
+    let (local, remote) = try_join!(
         async_with_spinner(local_pb, |pb| make_snapshot(data_dir.clone(), pb)),
         async_with_spinner(remote_pb, |_| build_remote_snapshot(&url))
-    );
-
-    let local = local.context("Failed to build local snapshot")?;
-    let remote = remote.context("Failed to build remote snapshot")?;
+    )?;
 
     // ======================================================= //
     // =
