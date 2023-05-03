@@ -6,7 +6,11 @@ mod cmd;
 mod diffing;
 mod logging;
 
-use std::{future::Future, sync::atomic::Ordering, time::Duration};
+use std::{
+    future::Future,
+    sync::{atomic::Ordering, Arc},
+    time::Duration,
+};
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
@@ -20,7 +24,12 @@ use syncer_common::{
     snapshot::{make_snapshot, Snapshot, SnapshotFileMetadata, SnapshotItemMetadata},
     PING_ANSWER,
 };
-use tokio::{fs::File, join};
+use tokio::{
+    fs::File,
+    join,
+    sync::{Mutex, RwLock},
+    task::JoinSet,
+};
 use tokio_util::codec::{BytesCodec, Decoder};
 
 use crate::{
@@ -43,6 +52,7 @@ async fn inner_main() -> Result<()> {
         data_dir,
         address,
         verbose,
+        max_parallel_transfers,
     } = Args::parse();
 
     if verbose {
@@ -203,17 +213,17 @@ async fn inner_main() -> Result<()> {
             .iter()
             .filter_map(|(path, DiffItemAdded { new })| match new {
                 SnapshotItemMetadata::Directory => None,
-                SnapshotItemMetadata::File(mt) => Some((path, mt)),
+                SnapshotItemMetadata::File(mt) => Some((path.clone(), mt.clone())),
             })
             .chain(
                 modified
                     .iter()
-                    .map(|(path, DiffItemModified { prev: _, new })| (path, new)),
+                    .map(|(path, DiffItemModified { prev: _, new })| (path.clone(), new.clone())),
             )
             .chain(type_changed.iter().filter_map(
                 |(path, DiffItemTypeChanged { prev: _, new })| match new {
                     SnapshotItemMetadata::Directory => None,
-                    SnapshotItemMetadata::File(mt) => Some((path, mt)),
+                    SnapshotItemMetadata::File(mt) => Some((path.clone(), mt.clone())),
                 },
             ))
             .collect::<Vec<_>>();
@@ -249,11 +259,13 @@ async fn inner_main() -> Result<()> {
 
     let mp = MultiProgress::new();
 
-    let pb_msg = mp.add(
-        ProgressBar::new(1 as u64)
-            .with_style(ProgressStyle::with_template("{msg}").unwrap())
-            .with_message("Running..."),
-    );
+    let pb_msg = Arc::new(RwLock::new(
+        mp.add(
+            ProgressBar::new(1 as u64)
+                .with_style(ProgressStyle::with_template("{msg}").unwrap())
+                .with_message("Running..."),
+        ),
+    ));
 
     let delete_pb = mp.add(
         ProgressBar::new(to_delete.len() as u64).with_style(
@@ -264,50 +276,58 @@ async fn inner_main() -> Result<()> {
         ),
     );
 
-    let create_dirs_pb = mp.add(
-        ProgressBar::new(to_create_dirs.len() as u64).with_style(
-            ProgressStyle::with_template(
-                "Creating     : [{elapsed_precise}] {prefix} {bar:40} {pos}/{len} directories",
-            )
-            .unwrap(),
+    let create_dirs_pb = Arc::new(RwLock::new(
+        mp.add(
+            ProgressBar::new(to_create_dirs.len() as u64).with_style(
+                ProgressStyle::with_template(
+                    "Creating     : [{elapsed_precise}] {prefix} {bar:40} {pos}/{len} directories",
+                )
+                .unwrap(),
+            ),
         ),
-    );
+    ));
 
-    let transfer_pb = mp.add(
-        ProgressBar::new(to_transfer.len() as u64).with_style(
-            ProgressStyle::with_template(
-                "Transferring : [{elapsed_precise}] {prefix} {bar:40} {pos}/{len} files",
-            )
-            .unwrap(),
+    let transfer_pb = Arc::new(RwLock::new(
+        mp.add(
+            ProgressBar::new(to_transfer.len() as u64).with_style(
+                ProgressStyle::with_template(
+                    "Transferring : [{elapsed_precise}] {prefix} {bar:40} {pos}/{len} files",
+                )
+                .unwrap(),
+            ),
         ),
-    );
+    ));
 
-    let transfer_size_pb = mp.add(
+    let transfer_size_pb = Arc::new(RwLock::new( mp.add(
         ProgressBar::new(transfer_size as u64).with_style(
             ProgressStyle::with_template(
                 "Transfer size: [{elapsed_precise}] {prefix} {bar:40} {bytes}/{total_bytes} ({binary_bytes_per_sec})",
             )
             .unwrap(),
         ),
-    );
+    )));
 
-    let mut errors = vec![];
+    let errors = Arc::new(Mutex::new(vec![]));
 
-    let mut report_err = |err: String| {
-        errors.push(err);
-        pb_msg.set_message(
-            format!(
-                "Running... (encountered {} error(s))\n{}",
-                errors.len(),
-                errors
-                    .iter()
-                    .map(|err| format!("\n* {err}"))
-                    .collect::<String>()
-            )
-            .bright_red()
-            .to_string(),
-        );
-    };
+    macro_rules! report_err {
+        ($err: expr, $errors: expr, $pb_msg: expr) => {{
+            let mut errors = $errors.lock().await;
+
+            errors.push($err);
+            $pb_msg.read().await.set_message(
+                format!(
+                    "Running... (encountered {} error(s))\n{}",
+                    errors.len(),
+                    errors
+                        .iter()
+                        .map(|err| format!("\n* {err}"))
+                        .collect::<String>()
+                )
+                .bright_red()
+                .to_string(),
+            );
+        }}
+    }
 
     for (path, item) in &to_delete {
         let uri_item_type = match item {
@@ -322,45 +342,73 @@ async fn inner_main() -> Result<()> {
         match req.send().await {
             Ok(data) => {
                 if let Err(err) = data.error_for_status() {
-                    report_err(format!("Failed to delete item at '{path}': {err}"));
+                    report_err!(
+                        format!("Failed to delete item at '{path}': {err}"),
+                        errors,
+                        pb_msg
+                    );
                 }
             }
 
             Err(err) => {
-                report_err(format!(
-                    "Failed to send deletion request for item '{path}': {err}"
-                ));
+                report_err!(
+                    format!("Failed to send deletion request for item '{path}': {err}"),
+                    errors,
+                    pb_msg
+                );
             }
         }
 
         delete_pb.inc(1);
     }
 
-    delete_pb.finish();
+    // delete_pb.finish();
+
+    let mut task_pool = JoinSet::new();
 
     for path in &to_create_dirs {
-        let req = Client::new()
-            .post(url.join(&format!("/fs/dir/create"))?)
-            .query(&[("path", path)]);
+        let url = url.clone();
+        let path = String::clone(path);
+        let errors = Arc::clone(&errors);
+        let pb_msg = Arc::clone(&pb_msg);
+        let create_dirs_pb = Arc::clone(&create_dirs_pb);
 
-        match req.send().await {
-            Ok(data) => {
-                if let Err(err) = data.error_for_status() {
-                    report_err(format!("Failed to create directory '{path}': {err}"));
+        task_pool.spawn(async move {
+            let req = Client::new()
+                .post(url.join(&format!("/fs/dir/create")).unwrap())
+                .query(&[("path", &path)]);
+
+            match req.send().await {
+                Ok(data) => {
+                    if let Err(err) = data.error_for_status() {
+                        report_err!(
+                            format!("Failed to create directory '{path}': {err}"),
+                            errors,
+                            pb_msg
+                        );
+                    }
+                }
+
+                Err(err) => {
+                    report_err!(
+                        format!("Failed to send directory creation request '{path}': {err}"),
+                        errors,
+                        pb_msg
+                    );
                 }
             }
 
-            Err(err) => {
-                report_err(format!(
-                    "Failed to send directory creation request '{path}': {err}"
-                ));
-            }
-        }
-
-        create_dirs_pb.inc(1);
+            create_dirs_pb.read().await.inc(1);
+        });
     }
 
-    create_dirs_pb.finish();
+    while let Some(result) = task_pool.join_next().await {
+        result?;
+    }
+
+    // create_dirs_pb.read().await.finish();
+
+    let mut task_pool = JoinSet::new();
 
     for (
         path,
@@ -369,49 +417,83 @@ async fn inner_main() -> Result<()> {
             last_modif_date_ns,
             size,
         },
-    ) in &to_transfer
+    ) in to_transfer
     {
-        match File::open(data_dir.join(path)).await {
-            Err(err) => report_err(format!("Failed to open file '{path}' for transfer: {err}")),
+        while task_pool.len() > max_parallel_transfers {
+            task_pool.join_next().await.unwrap()?;
+        }
 
-            Ok(file) => {
-                let transfer_size_pb = transfer_size_pb.clone();
+        let data_dir = data_dir.clone();
+        let url = url.clone();
+        let errors = Arc::clone(&errors);
+        let pb_msg = Arc::clone(&pb_msg);
+        let transfer_pb = Arc::clone(&transfer_pb);
+        let transfer_size_pb = Arc::clone(&transfer_size_pb);
 
-                let stream = BytesCodec::new()
-                    .framed(file)
-                    .inspect_ok(move |chunk| transfer_size_pb.inc(chunk.len() as u64));
+        task_pool.spawn(async move {
+            match File::open(data_dir.join(&path)).await {
+                Err(err) => report_err!(
+                    format!("Failed to open file '{path}' for transfer: {err}"),
+                    errors,
+                    pb_msg
+                ),
 
-                let file_body = Body::wrap_stream(stream);
+                Ok(file) => {
+                    let transfer_size_pb = transfer_size_pb.clone();
 
-                let req = Client::new()
-                    .post(url.join("/fs/file/write")?)
-                    .query(&[("path", path)])
-                    .query(&[("last_modification", last_modif_date)])
-                    .query(&[("last_modification_ns", last_modif_date_ns)])
-                    .query(&[("size", size)])
-                    .body(file_body);
+                    let stream = BytesCodec::new().framed(file).inspect_ok(move |chunk| {
+                        let size = chunk.len() as u64;
+                        let transfer_size_pb = Arc::clone(&transfer_size_pb);
 
-                match req.send().await {
-                    Ok(data) => {
-                        if let Err(err) = data.error_for_status() {
-                            report_err(format!("Failed to transfer file '{path}': {err}"));
+                        tokio::spawn(async move {
+                            transfer_size_pb.read().await.inc(size);
+                        });
+                    });
+
+                    let file_body = Body::wrap_stream(stream);
+
+                    let req = Client::new()
+                        .post(url.join("/fs/file/write").unwrap())
+                        .query(&[("path", &path)])
+                        .query(&[("last_modification", last_modif_date)])
+                        .query(&[("last_modification_ns", last_modif_date_ns)])
+                        .query(&[("size", size)])
+                        .body(file_body);
+
+                    match req.send().await {
+                        Ok(data) => {
+                            if let Err(err) = data.error_for_status() {
+                                report_err!(
+                                    format!("Failed to transfer file '{path}': {err}"),
+                                    errors,
+                                    pb_msg
+                                );
+                            }
                         }
-                    }
 
-                    Err(err) => {
-                        report_err(format!(
-                            "Failed to complete request for file '{path}': {err}"
-                        ));
+                        Err(err) => {
+                            report_err!(
+                                format!("Failed to complete request for file '{path}': {err}"),
+                                errors,
+                                pb_msg
+                            );
+                        }
                     }
                 }
             }
-        }
 
-        transfer_pb.inc(1);
+            transfer_pb.read().await.inc(1);
+        });
     }
 
-    transfer_pb.finish();
-    transfer_size_pb.finish();
+    while let Some(result) = task_pool.join_next().await {
+        result?;
+    }
+
+    // transfer_pb.read().await.finish();
+    // transfer_size_pb.read().await.finish();
+
+    let errors = errors.lock().await;
 
     if !errors.is_empty() {
         bail!("{} error(s) occurred.", errors.len(),);
