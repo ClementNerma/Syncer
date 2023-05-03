@@ -129,6 +129,31 @@ async fn inner_main() -> Result<()> {
         deleted,
     } = build_diff(&local, &remote);
 
+    let modified = modified
+        .into_iter()
+        .filter(|(path, DiffItemModified { prev, new })| {
+            let SnapshotFileMetadata {
+                size,
+                last_modif_date,
+                last_modif_date_ns,
+            } = new;
+
+            if *size != prev.size {
+                return true;
+            }
+
+            let truncated_timestamp_diff = last_modif_date.abs_diff(u64::from(*last_modif_date_ns));
+            assert!(truncated_timestamp_diff != 0);
+
+            if truncated_timestamp_diff <= 1 {
+                debug!("Ignoring modified item '{path}' as modification time is no more than 2 seconds.");
+                false
+            } else {
+                true
+            }
+        })
+        .collect::<Vec<_>>();
+
     if added.is_empty() && modified.is_empty() && type_changed.is_empty() && deleted.is_empty() {
         success!("Nothing to do!");
         return Ok(());
