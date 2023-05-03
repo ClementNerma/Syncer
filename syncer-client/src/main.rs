@@ -6,19 +6,21 @@ mod cmd;
 mod diffing;
 mod logging;
 
-use std::{error, future::Future, sync::atomic::Ordering, time::Duration};
+use std::{future::Future, sync::atomic::Ordering, time::Duration};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::Parser;
 use cmd::Args;
 use colored::Colorize;
+use dialoguer::Confirm;
 use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
-use reqwest::{Client, Url};
+use reqwest::{Body, Client, Url};
 use syncer_common::{
     snapshot::{make_snapshot, Snapshot, SnapshotFileMetadata, SnapshotItemMetadata},
     PING_ANSWER,
 };
-use tokio::join;
+use tokio::{fs::File, join};
+use tokio_util::codec::{BytesCodec, FramedRead};
 
 use crate::{
     diffing::{
@@ -82,7 +84,7 @@ async fn inner_main() -> Result<()> {
 
     let (local, remote) = join!(
         async_with_spinner(local_pb, |pb| make_snapshot(data_dir.clone(), pb)),
-        async_with_spinner(remote_pb, |_| build_remote_snapshot(url.clone()))
+        async_with_spinner(remote_pb, |_| build_remote_snapshot(&url))
     );
 
     let local = local.context("Failed to build local snapshot")?;
@@ -225,32 +227,78 @@ async fn inner_main() -> Result<()> {
         )
         .collect::<Vec<_>>();
 
+    let transfer_size = to_transfer.iter().map(|(_, mt)| mt.size).sum();
+
     info!(
         "Found a total of {} files (+ {} dirs) to transfer and {} to delete for a total of {}.",
         to_transfer.len().to_string().bright_green(),
         to_create_dirs.len().to_string().bright_green(),
         to_delete.len().to_string().bright_red(),
-        format!(
-            "{}",
-            HumanBytes(to_transfer.iter().map(|(_, mt)| mt.size).sum())
-        )
-        .bright_yellow()
+        format!("{}", HumanBytes(transfer_size)).bright_yellow()
     );
 
-    // TODO: actual transfer :p
+    let confirm = Confirm::new()
+        .with_prompt("Continue?".bright_blue().to_string())
+        .interact()?;
 
-    // added
-    // modified
-    // type_changed
-    // deleted
-
-    let mut errors = vec![];
+    if !confirm {
+        warn!("Transfer was cancelled.");
+        std::process::exit(1);
+    }
 
     let mp = MultiProgress::new();
 
-    let delete_pb = mp.add(ProgressBar::new(to_delete.len() as u64));
-    let create_dirs_pb = mp.add(ProgressBar::new(to_create_dirs.len() as u64));
-    let transfer_pb = mp.add(ProgressBar::new(to_transfer.len() as u64));
+    let pb_msg = mp.add(
+        ProgressBar::new(1 as u64)
+            .with_style(ProgressStyle::with_template("{msg}").unwrap())
+            .with_message("Running..."),
+    );
+
+    let pb_style =
+        ProgressStyle::with_template("[{elapsed_precise}] {prefix} {bar:40} {pos}/{len} {msg}")
+            .unwrap();
+
+    let delete_pb = mp.add(
+        ProgressBar::new(to_delete.len() as u64)
+            .with_style(pb_style.clone())
+            .with_prefix("Deleting     :"),
+    );
+
+    let create_dirs_pb = mp.add(
+        ProgressBar::new(to_create_dirs.len() as u64)
+            .with_style(pb_style.clone())
+            .with_prefix("Creating dirs:"),
+    );
+
+    let transfer_pb = mp.add(
+        ProgressBar::new(to_transfer.len() as u64)
+            .with_style(pb_style.clone())
+            .with_prefix("Transferring :"),
+    );
+
+    let transfer_size_pb = mp.add(
+        ProgressBar::new(transfer_size as u64)
+            .with_style(pb_style.clone())
+            .with_prefix("Transfer size:"),
+    );
+
+    let mut errors = vec![];
+
+    let mut report_err = |err: String| {
+        errors.push(err);
+        pb_msg.set_message(
+            format!(
+                "Running... (encountered {} error(s))\n{}",
+                errors.len(),
+                errors
+                    .iter()
+                    .map(|err| format!("\n* {err}"))
+                    .collect::<String>()
+            )
+            .bright_red()
+            .to_string(),
+        );
+    };
 
     for (path, item) in &to_delete {
         let uri_item_type = match item {
@@ -259,11 +307,21 @@ async fn inner_main() -> Result<()> {
         };
 
         let req = Client::new()
-            .delete(&format!("{url}/fs/{uri_item_type}/delete",))
+            .delete(url.join(&format!("/fs/{uri_item_type}/delete"))?)
             .query(&[("path", path)]);
 
-        if let Err(err) = req.send().await {
-            errors.push(format!("Failed to delete file '{path}': {err}"));
+        match req.send().await {
+            Ok(data) => {
+                if let Err(err) = data.error_for_status() {
+                    report_err(format!("Failed to delete item at '{path}': {err}"));
+                }
+            }
+
+            Err(err) => {
+                report_err(format!(
+                    "Failed to send deletion request for item '{path}': {err}"
+                ));
+            }
         }
 
         delete_pb.inc(1);
@@ -271,11 +329,21 @@ async fn inner_main() -> Result<()> {
 
     for path in &to_create_dirs {
         let req = Client::new()
-            .put(&format!("{url}/fs/dir/create"))
+            .put(url.join(&format!("/fs/dir/create"))?)
             .query(&[("path", path)]);
 
-        if let Err(err) = req.send().await {
-            errors.push(format!("Failed to create directory '{path}': {err}"));
+        match req.send().await {
+            Ok(data) => {
+                if let Err(err) = data.error_for_status() {
+                    report_err(format!("Failed to create directory '{path}': {err}"));
+                }
+            }
+
+            Err(err) => {
+                report_err(format!(
+                    "Failed to send directory creation request '{path}': {err}"
+                ));
+            }
         }
 
         create_dirs_pb.inc(1);
@@ -290,43 +358,55 @@ async fn inner_main() -> Result<()> {
         },
     ) in &to_transfer
     {
-        let req = Client::new()
-            .put(&format!("{url}/fs/file/write"))
-            .query(&[("path", path)]);
+        match File::open(data_dir.join(path)).await {
+            Err(err) => report_err(format!("Failed to open file '{path}' for transfer: {err}")),
 
-        if let Err(err) = req.send().await {
-            errors.push(format!("Failed to transfer file '{path}': {err}"));
+            Ok(file) => {
+                let stream = FramedRead::new(file, BytesCodec::new());
+                let file_body = Body::wrap_stream(stream);
+
+                let req = Client::new()
+                    .put(url.join("/fs/file/write")?)
+                    .query(&[("path", path)])
+                    .query(&[("last_modif_date", last_modif_date)])
+                    .query(&[("last_modif_date_ns", last_modif_date_ns)])
+                    .query(&[("size", size)])
+                    .body(file_body);
+
+                match req.send().await {
+                    Ok(data) => {
+                        if let Err(err) = data.error_for_status() {
+                            report_err(format!("Failed to transfer file '{path}': {err}"));
+                        }
+                    }
+
+                    Err(err) => {
+                        report_err(format!("Failed to transfer file '{path}': {err}"));
+                    }
+                }
+            }
         }
 
         transfer_pb.inc(1);
-
-        // TODO: handle last_modif_date, last_modif_date_ns, and size
-        // used by the server to assert everything is valid + write timestamps
+        transfer_size_pb.inc(*size);
     }
 
     if !errors.is_empty() {
-        bail!(
-            "{} error(s) occurred:\n{}",
-            errors.len(),
-            errors
-                .iter()
-                .map(|err| format!("\n* {err}"))
-                .collect::<String>()
-        );
+        bail!("{} error(s) occurred.", errors.len(),);
     }
 
     success!("Synchronized successfully.");
     Ok(())
 }
 
-async fn build_remote_snapshot(mut url: Url) -> Result<Snapshot> {
-    url.path_segments_mut()
-        .map_err(|()| anyhow!("Provided URL cannot be used as a base"))?
-        .push("snapshot");
-
-    let res = reqwest::get(url)
+async fn build_remote_snapshot(url: &Url) -> Result<Snapshot> {
+    let res = reqwest::get(url.join("snapshot")?)
         .await
         .context("Failed to get remote snapshot")?;
+
+    let res = res
+        .error_for_status()
+        .context("Failed to build remote snapshot")?;
 
     let res = res
         .json()

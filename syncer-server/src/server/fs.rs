@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use anyhow::Context;
 use axum::{
     body::StreamBody,
     extract::{BodyStream, Query, State},
@@ -7,6 +8,7 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+use filetime::FileTime;
 use futures_util::StreamExt;
 use serde::Deserialize;
 use syncer_common::snapshot::{make_snapshot, Snapshot};
@@ -83,9 +85,21 @@ pub async fn read_file(
     Ok(body)
 }
 
+#[derive(Deserialize)]
+pub struct FileMetadataQuery {
+    last_modification: i64,
+    last_modification_ns: u32,
+    size: u64,
+}
+
 pub async fn write_file(
     state: State<SharedState>,
     Query(PathQuery { path }): Query<PathQuery>,
+    Query(FileMetadataQuery {
+        last_modification,
+        last_modification_ns,
+        size,
+    }): Query<FileMetadataQuery>,
     mut stream: BodyStream,
 ) -> ServerResult<()> {
     let path = _validate_data_dir_descendent(&path, &state.read().await.data_dir)?;
@@ -115,6 +129,18 @@ pub async fn write_file(
             .await
             .map_err(handle_err!(INTERNAL_SERVER_ERROR))?;
     }
+
+    tokio::task::spawn_blocking(move || {
+        filetime::set_file_mtime(
+            path,
+            FileTime::from_unix_time(last_modification, last_modification_ns),
+        )
+        .context("Failed to set modification time")
+    })
+    .await
+    .context("Failed to run modification time setter")
+    .map_err(handle_err!(INTERNAL_SERVER_ERROR))?
+    .map_err(handle_err!(INTERNAL_SERVER_ERROR))?;
 
     Ok(())
 }
