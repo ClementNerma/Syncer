@@ -13,6 +13,7 @@ use clap::Parser;
 use cmd::Args;
 use colored::Colorize;
 use dialoguer::Confirm;
+use futures_util::TryStreamExt;
 use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
 use reqwest::{Body, Client, Url};
 use syncer_common::{
@@ -20,7 +21,7 @@ use syncer_common::{
     PING_ANSWER,
 };
 use tokio::{fs::File, join};
-use tokio_util::codec::{BytesCodec, FramedRead};
+use tokio_util::codec::{BytesCodec, Decoder};
 
 use crate::{
     diffing::{
@@ -284,7 +285,7 @@ async fn inner_main() -> Result<()> {
     let transfer_size_pb = mp.add(
         ProgressBar::new(transfer_size as u64).with_style(
             ProgressStyle::with_template(
-                "Transfer size: [{elapsed_precise}] {prefix} {bar:40} {bytes}/{total_bytes}",
+                "Transfer size: [{elapsed_precise}] {prefix} {bar:40} {bytes}/{total_bytes} ({binary_bytes_per_sec})",
             )
             .unwrap(),
         ),
@@ -374,7 +375,12 @@ async fn inner_main() -> Result<()> {
             Err(err) => report_err(format!("Failed to open file '{path}' for transfer: {err}")),
 
             Ok(file) => {
-                let stream = FramedRead::new(file, BytesCodec::new());
+                let transfer_size_pb = transfer_size_pb.clone();
+
+                let stream = BytesCodec::new()
+                    .framed(file)
+                    .inspect_ok(move |chunk| transfer_size_pb.inc(chunk.len() as u64));
+
                 let file_body = Body::wrap_stream(stream);
 
                 let req = Client::new()
@@ -402,7 +408,6 @@ async fn inner_main() -> Result<()> {
         }
 
         transfer_pb.inc(1);
-        transfer_size_pb.inc(*size);
     }
 
     transfer_pb.finish();
