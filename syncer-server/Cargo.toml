@@ -1,7 +1,9 @@
 [package]
 name = "syncer-server"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
+license = "Apache-2.0"
+description = "CLI server for Syncer"
 
 [dependencies]
 anyhow = "1.0.70"

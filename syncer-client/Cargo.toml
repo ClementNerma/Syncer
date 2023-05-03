@@ -2,6 +2,8 @@
 name = "syncer-client"
 version = "0.0.1"
 edition = "2021"
+license = "Apache-2.0"
+description = "CLI client for Syncer"
 
 [dependencies]
 anyhow = "1.0.71"
