@@ -381,7 +381,9 @@ async fn inner_main() -> Result<()> {
                     }
 
                     Err(err) => {
-                        report_err(format!("Failed to transfer file '{path}': {err}"));
+                        report_err(format!(
+                            "Failed to complete request for file '{path}': {err}"
+                        ));
                     }
                 }
             }

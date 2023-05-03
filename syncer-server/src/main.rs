@@ -30,12 +30,14 @@ async fn inner_main() -> Result<()> {
     } = Args::parse();
 
     tracing_subscriber::fmt()
+        .with_target(false)
         .with_timer(SystemTime)
         .with_max_level(if verbose {
             LevelFilter::DEBUG
         } else {
             LevelFilter::INFO
         })
+        .compact()
         .init();
 
     serve(&server_address, PathBuf::from(&data_dir)).await

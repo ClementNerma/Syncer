@@ -17,9 +17,9 @@ use tokio::{
     io::AsyncWriteExt,
 };
 use tokio_util::io::ReaderStream;
-use tracing::info;
+use tracing::trace;
 
-use crate::handle_err;
+use crate::{handle_err, server_err, throw_err};
 
 use super::{ServerResult, SharedState};
 
@@ -31,20 +31,19 @@ pub struct PathQuery {
 fn _validate_data_dir_descendent(path: &Path, data_dir: &Path) -> ServerResult<PathBuf> {
     let path = data_dir.join(path);
 
-    path.strip_prefix(data_dir)
-        .map(Path::to_path_buf)
-        .map_err(|_| {
-            (
-                StatusCode::BAD_REQUEST,
-                "Provided path is not a descendent of the data directory".to_string(),
-            )
-        })
+    match path.strip_prefix(data_dir) {
+        Ok(_) => Ok(path),
+        Err(_) => Err(server_err!(
+            BAD_REQUEST,
+            "Provided path is not a descendent of the data directory"
+        )),
+    }
 }
 
 pub async fn snapshot(state: State<SharedState>) -> ServerResult<Json<Snapshot>> {
-    match make_snapshot(state.read().await.data_dir.clone(), |msg| info!("{msg}")).await {
+    match make_snapshot(state.read().await.data_dir.clone(), |msg| trace!("{msg}")).await {
         Ok(snapshot) => Ok(Json(snapshot)),
-        Err(err) => Err((StatusCode::INTERNAL_SERVER_ERROR, format!("{err}"))),
+        Err(err) => throw_err!(INTERNAL_SERVER_ERROR, format!("{err}")),
     }
 }
 
@@ -55,24 +54,15 @@ pub async fn read_file(
     let path = _validate_data_dir_descendent(&path, &state.read().await.data_dir)?;
 
     if !path.exists() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Provided path does not exist".to_string(),
-        ));
+        throw_err!(BAD_REQUEST, "Provided path does not exist");
     }
 
     if path.is_symlink() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Provided path is a symbolic link".to_string(),
-        ));
+        throw_err!(BAD_REQUEST, "Provided path is a symbolic link");
     }
 
     if path.is_dir() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Provided path is a directory".to_string(),
-        ));
+        throw_err!(BAD_REQUEST, "Provided path is a directory");
     }
 
     let file = File::open(&path)
@@ -105,17 +95,11 @@ pub async fn write_file(
     let path = _validate_data_dir_descendent(&path, &state.read().await.data_dir)?;
 
     if path.is_symlink() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Provided path is a symbolic link".to_string(),
-        ));
+        throw_err!(BAD_REQUEST, "Provided path is a symbolic link");
     }
 
     if path.is_dir() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Provided path is a directory".to_string(),
-        ));
+        throw_err!(BAD_REQUEST, "Provided path is a directory");
     }
 
     let mut file = File::create(&path)
@@ -123,7 +107,7 @@ pub async fn write_file(
         .map_err(handle_err!(INTERNAL_SERVER_ERROR))?;
 
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(handle_err!(BAD_REQUEST))?;
+        let chunk = chunk.map_err(handle_err!(INTERNAL_SERVER_ERROR))?;
 
         file.write_all(&chunk)
             .await
@@ -152,24 +136,15 @@ pub async fn remove_file(
     let path = _validate_data_dir_descendent(&path, &state.read().await.data_dir)?;
 
     if !path.exists() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Provided path does not exist".to_string(),
-        ));
+        throw_err!(BAD_REQUEST, "Provided path does not exist");
     }
 
     if path.is_symlink() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Provided path is a symbolic link".to_string(),
-        ));
+        throw_err!(BAD_REQUEST, "Provided path is a symbolic link");
     }
 
     if !path.is_file() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Provided path is not a file".to_string(),
-        ));
+        throw_err!(BAD_REQUEST, "Provided path is not a file");
     }
 
     fs::remove_file(&path)
@@ -186,17 +161,11 @@ pub async fn create_dir(
     let path = _validate_data_dir_descendent(&path, &state.read().await.data_dir)?;
 
     if path.exists() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Provided path already exists".to_string(),
-        ));
+        throw_err!(CONFLICT, "Provided path already exists");
     }
 
     if path.is_symlink() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Provided path is a symbolic link".to_string(),
-        ));
+        throw_err!(CONFLICT, "Provided path is a symbolic link");
     }
 
     fs::create_dir(&path)
@@ -213,24 +182,15 @@ pub async fn remove_dir(
     let path = _validate_data_dir_descendent(&path, &state.read().await.data_dir)?;
 
     if !path.exists() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Provided path does not exist".to_string(),
-        ));
+        throw_err!(CONFLICT, "Provided path does not exist");
     }
 
     if path.is_symlink() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Provided path is a symbolic link".to_string(),
-        ));
+        throw_err!(CONFLICT, "Provided path is a symbolic link");
     }
 
     if !path.is_dir() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Provided path is not a directory".to_string(),
-        ));
+        throw_err!(CONFLICT, "Provided path is not a directory");
     }
 
     fs::remove_dir(&path)

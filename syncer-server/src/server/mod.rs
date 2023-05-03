@@ -8,7 +8,7 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use anyhow::{bail, Result};
 use axum::{
-    http::StatusCode,
+    response::Response,
     routing::{delete, get, put},
     Router, Server,
 };
@@ -55,14 +55,28 @@ pub async fn serve(addr: &SocketAddr, data_dir: PathBuf) -> Result<()> {
 }
 
 #[macro_export]
+macro_rules! server_err {
+    ($variant: ident, $msg: expr) => {{
+        ::tracing::error!("> Request failed: {}", $msg);
+        (StatusCode::$variant, $msg).into_response()
+    }};
+}
+
+#[macro_export]
 macro_rules! handle_err {
     ($variant: ident) => {
-        |err| (StatusCode::$variant, format!("{err}"))
+        |err| $crate::server_err!($variant, format!("{err}"))
     };
 }
 
-type ServerError = (StatusCode, String);
-type ServerResult<T> = Result<T, ServerError>;
+#[macro_export]
+macro_rules! throw_err {
+    ($variant: ident, $err: expr) => {
+        return Err($crate::server_err!($variant, $err))
+    };
+}
+
+type ServerResult<T> = Result<T, Response>;
 
 async fn ping() -> &'static str {
     PING_ANSWER
