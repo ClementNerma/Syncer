@@ -9,7 +9,7 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use anyhow::{bail, Result};
 use axum::{
     response::Response,
-    routing::{delete, get, put},
+    routing::{delete, get, post},
     Router, Server,
 };
 use syncer_common::PING_ANSWER;
@@ -39,9 +39,10 @@ pub async fn serve(addr: &SocketAddr, data_dir: PathBuf) -> Result<()> {
         .route("/", get(ping))
         .route("/snapshot", get(snapshot))
         .route("/fs/file/read", get(read_file))
-        .route("/fs/file/write", put(write_file))
+        // TODO: use this ^^^^^
+        .route("/fs/file/write", post(write_file))
         .route("/fs/file/delete", delete(remove_file))
-        .route("/fs/dir/create", put(create_dir))
+        .route("/fs/dir/create", post(create_dir))
         .route("/fs/dir/delete", delete(remove_dir))
         .with_state(Arc::new(RwLock::new(state)))
         .layer(TraceLayer::new_for_http())

@@ -327,9 +327,11 @@ async fn inner_main() -> Result<()> {
         delete_pb.inc(1);
     }
 
+    delete_pb.finish();
+
     for path in &to_create_dirs {
         let req = Client::new()
-            .put(url.join(&format!("/fs/dir/create"))?)
+            .post(url.join(&format!("/fs/dir/create"))?)
             .query(&[("path", path)]);
 
         match req.send().await {
@@ -349,6 +351,8 @@ async fn inner_main() -> Result<()> {
         create_dirs_pb.inc(1);
     }
 
+    create_dirs_pb.finish();
+
     for (
         path,
         SnapshotFileMetadata {
@@ -366,7 +370,7 @@ async fn inner_main() -> Result<()> {
                 let file_body = Body::wrap_stream(stream);
 
                 let req = Client::new()
-                    .put(url.join("/fs/file/write")?)
+                    .post(url.join("/fs/file/write")?)
                     .query(&[("path", path)])
                     .query(&[("last_modif_date", last_modif_date)])
                     .query(&[("last_modif_date_ns", last_modif_date_ns)])
@@ -392,6 +396,9 @@ async fn inner_main() -> Result<()> {
         transfer_pb.inc(1);
         transfer_size_pb.inc(*size);
     }
+
+    transfer_pb.finish();
+    transfer_size_pb.finish();
 
     if !errors.is_empty() {
         bail!("{} error(s) occurred.", errors.len(),);
