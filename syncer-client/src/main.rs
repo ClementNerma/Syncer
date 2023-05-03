@@ -24,6 +24,7 @@ use syncer_common::{
     snapshot::{make_snapshot, Snapshot, SnapshotFileMetadata, SnapshotItemMetadata},
     PING_ANSWER,
 };
+use time::OffsetDateTime;
 use tokio::{
     fs::File,
     join,
@@ -155,11 +156,28 @@ async fn inner_main() -> Result<()> {
     if !modified.is_empty() {
         info!("Modified:");
 
-        for (path, modified) in &modified {
-            println!(
-                "{}",
-                format!(" {} ({})", path, HumanBytes(modified.new.size)).bright_yellow()
-            );
+        for (path, DiffItemModified { prev, new }) in &modified {
+            let how = if prev.size != new.size {
+                format!("({} => {})", HumanBytes(prev.size), HumanBytes(new.size))
+            } else if prev.last_modif_date != new.last_modif_date
+                || prev.last_modif_date_ns != new.last_modif_date_ns
+            {
+                let prev =
+                    OffsetDateTime::from_unix_timestamp(prev.last_modif_date.try_into().unwrap())
+                        .unwrap()
+                        + Duration::from_nanos(prev.last_modif_date_ns.into());
+
+                let new =
+                    OffsetDateTime::from_unix_timestamp(new.last_modif_date.try_into().unwrap())
+                        .unwrap()
+                        + Duration::from_nanos(new.last_modif_date_ns.into());
+
+                format!("({prev} => {new})")
+            } else {
+                unreachable!();
+            };
+
+            println!("{} {}", path.bright_yellow(), how.bright_yellow());
         }
 
         println!();
@@ -237,17 +255,17 @@ async fn inner_main() -> Result<()> {
             .iter()
             .filter_map(|(path, DiffItemAdded { new })| match new {
                 SnapshotItemMetadata::Directory => None,
-                SnapshotItemMetadata::File(mt) => Some((path.clone(), mt.clone())),
+                SnapshotItemMetadata::File(mt) => Some((path.clone(), mt)),
             })
             .chain(
                 modified
                     .iter()
-                    .map(|(path, DiffItemModified { prev: _, new })| (path.clone(), new.clone())),
+                    .map(|(path, DiffItemModified { prev: _, new })| (path.clone(), new)),
             )
             .chain(type_changed.iter().filter_map(
                 |(path, DiffItemTypeChanged { prev: _, new })| match new {
                     SnapshotItemMetadata::Directory => None,
-                    SnapshotItemMetadata::File(mt) => Some((path.clone(), mt.clone())),
+                    SnapshotItemMetadata::File(mt) => Some((path.clone(), mt)),
                 },
             ))
             .collect::<Vec<_>>();
@@ -291,7 +309,7 @@ async fn inner_main() -> Result<()> {
 
     let pb_msg = Arc::new(RwLock::new(
         mp.add(
-            ProgressBar::new(1 as u64)
+            ProgressBar::new(1)
                 .with_style(ProgressStyle::with_template("{msg}").unwrap())
                 .with_message("Running..."),
         ),
@@ -331,7 +349,7 @@ async fn inner_main() -> Result<()> {
     ));
 
     let transfer_size_pb = Arc::new(RwLock::new( mp.add(
-        ProgressBar::new(transfer_size as u64).with_style(
+        ProgressBar::new(transfer_size ).with_style(
             ProgressStyle::with_template(
                 "Transfer size: [{elapsed_precise}] {prefix} {bar:40} {bytes}/{total_bytes} ({binary_bytes_per_sec})",
             )
@@ -370,8 +388,7 @@ async fn inner_main() -> Result<()> {
     let mut task_pool = JoinSet::new();
 
     for (path, item) in to_delete {
-        let path = String::clone(&path);
-        let item = item.clone();
+        let path = String::clone(path);
 
         let errors = Arc::clone(&errors);
         let pb_msg = Arc::clone(&pb_msg);
@@ -383,7 +400,7 @@ async fn inner_main() -> Result<()> {
         };
 
         let req = Client::new()
-            .delete(url.join(&format!("/fs/{uri_item_type}/delete")).unwrap())
+            .delete(url.join(&format!("/fs/{uri_item_type}/delete"))?)
             .query(&[("path", &path)]);
 
         task_pool.spawn(async move {
@@ -431,7 +448,7 @@ async fn inner_main() -> Result<()> {
         let create_dirs_pb = Arc::clone(&create_dirs_pb);
 
         let req = Client::new()
-            .post(url.join(&format!("/fs/dir/create")).unwrap())
+            .post(url.join("/fs/dir/create")?)
             .query(&[("path", &path)]);
 
         task_pool.spawn(async move {
@@ -516,7 +533,7 @@ async fn inner_main() -> Result<()> {
                 let file_body = Body::wrap_stream(stream);
 
                 let req = Client::new()
-                    .post(url.join("/fs/file/write").unwrap())
+                    .post(url.join("/fs/file/write")?)
                     .query(&[("path", &path)])
                     .query(&[("last_modification", last_modif_date)])
                     .query(&[("last_modification_ns", last_modif_date_ns)])
