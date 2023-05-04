@@ -38,7 +38,7 @@ pub struct SnapshotFileMetadata {
     pub last_modif_date_ns: u32,
 }
 
-#[derive(Serialize, Deserialize, Default, Clone)]
+#[derive(Serialize, Deserialize, Default, Debug, Clone)]
 pub struct SnapshotOptions {
     pub ignore_paths: Vec<String>,
     pub ignore_names: Vec<String>,
@@ -74,22 +74,27 @@ impl SnapshotOptions {
         Ok(())
     }
 
-    pub fn should_ignore(&self, relative_path: &Path, from_dir: &Path) -> bool {
+    pub fn should_ignore(&self, path: &Path, from_dir: &Path) -> bool {
+        let relative_path = path.strip_prefix(from_dir).unwrap();
+
         if self
             .ignore_paths
             .iter()
-            .any(|c| relative_path == Path::new(c))
+            .any(|c| relative_path.strip_prefix(c).is_ok())
         {
             return true;
         }
 
-        if let Some(file_name) = relative_path.file_name() {
-            if self.ignore_names.iter().any(|c| OsStr::new(c) == file_name) {
-                return true;
-            }
+        if self.ignore_names.iter().any(|c| {
+            relative_path
+                .components()
+                .any(|component| component.as_os_str() == OsStr::new(c))
+        }) {
+            return true;
         }
 
-        if from_dir.join(relative_path).is_file() {
+        // TODO: handle is_file metadata errors
+        if path.is_file() {
             if let Some(ext) = relative_path.extension() {
                 if self.ignore_exts.iter().any(|c| OsStr::new(c) == ext) {
                     return true;
@@ -112,15 +117,23 @@ pub async fn make_snapshot(
     progress: impl Fn(String) + Send + Sync + 'static,
     options: &SnapshotOptions,
 ) -> Result<SnapshotResult> {
+    options.validate()?;
+
     let total = Arc::new(Mutex::new(AtomicUsize::new(0)));
     let progress = Arc::new(RwLock::new(progress));
 
-    let mut debug = vec![];
+    // TODO: use debug
+    let debug = vec![];
 
     let mut items = Vec::new();
 
-    for item in WalkDir::new(&from_dir).min_depth(1) {
-        let item = item?;
+    let walker = WalkDir::new(&from_dir)
+        .min_depth(1)
+        .into_iter()
+        .filter_entry(|entry| !options.should_ignore(entry.path(), &from_dir));
+
+    for item in walker {
+        let item = item.context("Failed to analyze directory entry")?;
 
         let from = from_dir.clone();
 
@@ -129,20 +142,11 @@ pub async fn make_snapshot(
 
         let path = item.path();
 
-        let relative_path = path.strip_prefix(&from_dir).unwrap();
+        let item = snapshot_item(path, &from)
+            .await
+            .with_context(|| format!("Failed analysis on filesystem item: {}", path.display()))?;
 
-        if options.should_ignore(relative_path, &from_dir) {
-            debug.push(format!(
-                "Ignored item based on provided options: {}",
-                path.strip_prefix(&from_dir).unwrap().display()
-            ));
-        } else {
-            let item = snapshot_item(path, &from).await.with_context(|| {
-                format!("Failed analysis on filesystem item: {}", path.display())
-            })?;
-
-            items.push(item);
-        }
+        items.push(item);
 
         let total = total.lock().await.fetch_add(1, Ordering::Release) + 1;
 
@@ -200,7 +204,7 @@ async fn snapshot_item(item: &Path, from: &Path) -> Result<SnapshotItem> {
         bail!("Unknown item type (not a symlink, file nor directory)");
     };
 
-    let relative_path = item.strip_prefix(from).unwrap().to_path_buf();
+    let relative_path = item.strip_prefix(from).unwrap();
 
     let relative_path_str = relative_path.to_str().with_context(|| {
         format!(
