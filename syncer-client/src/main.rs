@@ -8,6 +8,7 @@ mod logging;
 
 use std::{
     future::Future,
+    path::Path,
     sync::{atomic::Ordering, Arc},
     time::Duration,
 };
@@ -21,7 +22,9 @@ use futures_util::TryStreamExt;
 use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
 use reqwest::{Body, Client, Url};
 use syncer_common::{
-    snapshot::{make_snapshot, Snapshot, SnapshotFileMetadata, SnapshotItemMetadata},
+    snapshot::{
+        make_snapshot, SnapshotFileMetadata, SnapshotItemMetadata, SnapshotOptions, SnapshotResult,
+    },
     PING_ANSWER,
 };
 use time::OffsetDateTime;
@@ -54,6 +57,8 @@ async fn inner_main() -> Result<()> {
         address,
         verbose,
         max_parallel_transfers,
+        ignore_items,
+        ignore_exts,
     } = Args::parse();
 
     if verbose {
@@ -97,6 +102,21 @@ async fn inner_main() -> Result<()> {
 
     info!("Building snapshots...");
 
+    let options = SnapshotOptions {
+        ignore_paths: ignore_items
+            .iter()
+            .filter(|item| Path::new(item).is_absolute())
+            .map(|item| item.strip_prefix('/').unwrap().to_string())
+            .collect(),
+
+        ignore_names: ignore_items
+            .into_iter()
+            .filter(|item| !Path::new(item).is_absolute())
+            .collect(),
+
+        ignore_exts,
+    };
+
     let multi_progress = MultiProgress::new();
 
     let local_pb = multi_progress.add(async_spinner());
@@ -107,9 +127,17 @@ async fn inner_main() -> Result<()> {
     remote_pb.enable_steady_tick(Duration::from_millis(150));
 
     let (local, remote) = try_join!(
-        async_with_spinner(local_pb, |pb| make_snapshot(data_dir.clone(), pb)),
-        async_with_spinner(remote_pb, |_| build_remote_snapshot(&url))
+        async_with_spinner(local_pb, |pb| make_snapshot(data_dir.clone(), pb, &options)),
+        async_with_spinner(remote_pb, |_| build_remote_snapshot(&url, &options))
     )?;
+
+    for msg in local.debug {
+        debug!("[snapshot:local] {msg}");
+    }
+
+    for msg in remote.debug {
+        debug!("[snapshot:remote] {msg}");
+    }
 
     // ======================================================= //
     // =
@@ -124,7 +152,7 @@ async fn inner_main() -> Result<()> {
         modified,
         type_changed,
         deleted,
-    } = build_diff(&local, &remote);
+    } = build_diff(&local.snapshot, &remote.snapshot);
 
     let modified = modified
         .into_iter()
@@ -607,8 +635,11 @@ async fn inner_main() -> Result<()> {
     Ok(())
 }
 
-async fn build_remote_snapshot(url: &Url) -> Result<Snapshot> {
-    let res = reqwest::get(url.join("snapshot")?)
+async fn build_remote_snapshot(url: &Url, options: &SnapshotOptions) -> Result<SnapshotResult> {
+    let res = Client::new()
+        .get(url.join("snapshot")?)
+        .query(&[("options", options)])
+        .send()
         .await
         .context("Failed to get remote snapshot")?;
 

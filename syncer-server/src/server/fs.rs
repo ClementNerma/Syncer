@@ -11,7 +11,7 @@ use axum::{
 use filetime::FileTime;
 use futures_util::StreamExt;
 use serde::Deserialize;
-use syncer_common::snapshot::{make_snapshot, Snapshot};
+use syncer_common::snapshot::{make_snapshot, SnapshotOptions, SnapshotResult};
 use tokio::{
     fs::{self, File},
     io::AsyncWriteExt,
@@ -40,8 +40,22 @@ fn _validate_data_dir_descendent(path: &Path, data_dir: &Path) -> ServerResult<P
     }
 }
 
-pub async fn snapshot(state: State<SharedState>) -> ServerResult<Json<Snapshot>> {
-    match make_snapshot(state.read().await.data_dir.clone(), |msg| trace!("{msg}")).await {
+#[derive(Deserialize)]
+pub struct SnapshotQuery {
+    options: SnapshotOptions,
+}
+
+pub async fn snapshot(
+    state: State<SharedState>,
+    Query(SnapshotQuery { options }): Query<SnapshotQuery>,
+) -> ServerResult<Json<SnapshotResult>> {
+    match make_snapshot(
+        state.read().await.data_dir.clone(),
+        |msg| trace!("{msg}"),
+        &options,
+    )
+    .await
+    {
         Ok(snapshot) => Ok(Json(snapshot)),
         Err(err) => throw_err!(INTERNAL_SERVER_ERROR, format!("{err}")),
     }
