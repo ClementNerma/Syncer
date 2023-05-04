@@ -637,8 +637,8 @@ async fn inner_main() -> Result<()> {
 
 async fn build_remote_snapshot(url: &Url, options: &SnapshotOptions) -> Result<SnapshotResult> {
     let res = Client::new()
-        .get(url.join("snapshot")?)
-        .query(&[("options", options)])
+        .post(url.join("snapshot")?)
+        .json(options)
         .send()
         .await
         .context("Failed to get remote snapshot")?;

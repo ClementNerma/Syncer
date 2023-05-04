@@ -40,14 +40,9 @@ fn _validate_data_dir_descendent(path: &Path, data_dir: &Path) -> ServerResult<P
     }
 }
 
-#[derive(Deserialize)]
-pub struct SnapshotQuery {
-    options: SnapshotOptions,
-}
-
 pub async fn snapshot(
     state: State<SharedState>,
-    Query(SnapshotQuery { options }): Query<SnapshotQuery>,
+    Json(options): Json<SnapshotOptions>,
 ) -> ServerResult<Json<SnapshotResult>> {
     match make_snapshot(
         state.read().await.data_dir.clone(),

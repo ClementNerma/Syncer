@@ -37,7 +37,7 @@ pub async fn serve(addr: &SocketAddr, data_dir: PathBuf) -> Result<()> {
     // TODO: implement compression and decompression
     let app = Router::new()
         .route("/", get(ping))
-        .route("/snapshot", get(snapshot))
+        .route("/snapshot", post(snapshot))
         .route("/fs/file/read", get(read_file))
         // TODO: use this ^^^^^
         .route("/fs/file/write", post(write_file))
