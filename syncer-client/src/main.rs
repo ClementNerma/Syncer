@@ -20,7 +20,7 @@ use colored::Colorize;
 use dialoguer::Confirm;
 use futures_util::TryStreamExt;
 use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
-use reqwest::{Body, Client, Url};
+use reqwest::{header::AUTHORIZATION, Body, Client, Url};
 use syncer_common::{
     snapshot::{
         make_snapshot, SnapshotFileMetadata, SnapshotItemMetadata, SnapshotOptions, SnapshotResult,
@@ -55,6 +55,7 @@ async fn inner_main() -> Result<()> {
     let Args {
         data_dir,
         address,
+        server_secret,
         verbose,
         max_parallel_transfers,
         ignore_items,
@@ -81,7 +82,10 @@ async fn inner_main() -> Result<()> {
 
     let url = Url::parse(&address).context("Failed to parse provided server address")?;
 
-    let ping_text = reqwest::get(url.clone())
+    let ping_text = Client::new()
+        .get(url.clone())
+        .header(AUTHORIZATION, format!("Bearer {server_secret}"))
+        .send()
         .await
         .context("Failed to ping server")?
         .text()
@@ -128,7 +132,11 @@ async fn inner_main() -> Result<()> {
 
     let (local, remote) = try_join!(
         async_with_spinner(local_pb, |pb| make_snapshot(data_dir.clone(), pb, &options)),
-        async_with_spinner(remote_pb, |_| build_remote_snapshot(&url, &options))
+        async_with_spinner(remote_pb, |_| build_remote_snapshot(
+            &url,
+            &server_secret,
+            &options
+        ))
     )?;
 
     for msg in local.debug {
@@ -451,6 +459,7 @@ async fn inner_main() -> Result<()> {
 
         let req = Client::new()
             .delete(url.join(&format!("/fs/{uri_item_type}/delete"))?)
+            .header(AUTHORIZATION, format!("Bearer {server_secret}"))
             .query(&[("path", &path)]);
 
         task_pool.spawn(async move {
@@ -499,6 +508,7 @@ async fn inner_main() -> Result<()> {
 
         let req = Client::new()
             .post(url.join("/fs/dir/create")?)
+            .header(AUTHORIZATION, format!("Bearer {server_secret}"))
             .query(&[("path", &path)]);
 
         task_pool.spawn(async move {
@@ -588,6 +598,7 @@ async fn inner_main() -> Result<()> {
                     .query(&[("last_modification", last_modif_date)])
                     .query(&[("last_modification_ns", last_modif_date_ns)])
                     .query(&[("size", size)])
+                    .header(AUTHORIZATION, format!("Bearer {server_secret}"))
                     .body(file_body);
 
                 task_pool.spawn(async move {
@@ -635,9 +646,14 @@ async fn inner_main() -> Result<()> {
     Ok(())
 }
 
-async fn build_remote_snapshot(url: &Url, options: &SnapshotOptions) -> Result<SnapshotResult> {
+async fn build_remote_snapshot(
+    url: &Url,
+    server_secret: &str,
+    options: &SnapshotOptions,
+) -> Result<SnapshotResult> {
     let res = Client::new()
         .post(url.join("snapshot")?)
+        .header(AUTHORIZATION, format!("Bearer {server_secret}"))
         .json(options)
         .send()
         .await

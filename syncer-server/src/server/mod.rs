@@ -8,9 +8,13 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use anyhow::{bail, Result};
 use axum::{
+    extract::State,
+    headers::{authorization::Bearer, Authorization},
+    http::{Request, StatusCode},
+    middleware::{self, Next},
     response::Response,
     routing::{delete, get, post},
-    Router, Server,
+    Router, Server, TypedHeader,
 };
 use syncer_common::PING_ANSWER;
 use tokio::sync::RwLock;
@@ -22,17 +26,20 @@ use tracing::info;
 
 pub struct StateInner {
     pub data_dir: PathBuf,
+    pub secret: String,
 }
 
 type SharedState = Arc<RwLock<StateInner>>;
 
-pub async fn serve(addr: &SocketAddr, data_dir: PathBuf) -> Result<()> {
+pub async fn serve(addr: &SocketAddr, secret: String, data_dir: PathBuf) -> Result<()> {
     let cors = CorsLayer::new()
         .allow_methods(AllowMethods::any())
         .allow_headers(AllowHeaders::any())
         .allow_origin(AllowOrigin::any());
 
-    let state = StateInner { data_dir };
+    let state = StateInner { data_dir, secret };
+
+    let state = Arc::new(RwLock::new(state));
 
     // TODO: implement compression and decompression
     let app = Router::new()
@@ -44,8 +51,9 @@ pub async fn serve(addr: &SocketAddr, data_dir: PathBuf) -> Result<()> {
         .route("/fs/file/delete", delete(remove_file))
         .route("/fs/dir/create", post(create_dir))
         .route("/fs/dir/delete", delete(remove_dir))
-        .with_state(Arc::new(RwLock::new(state)))
+        .with_state(Arc::clone(&state))
         .layer(TraceLayer::new_for_http())
+        .layer(middleware::from_fn_with_state(Arc::clone(&state), auth))
         .layer(cors);
 
     info!("Starting server at {addr}...");
@@ -78,6 +86,22 @@ macro_rules! throw_err {
 }
 
 type ServerResult<T> = Result<T, Response>;
+
+async fn auth<B>(
+    state: State<SharedState>,
+    TypedHeader(auth_header): TypedHeader<Authorization<Bearer>>,
+    req: Request<B>,
+    next: Next<B>,
+) -> Result<Response, (StatusCode, &'static str)> {
+    if state.read().await.secret == auth_header.token() {
+        Ok(next.run(req).await)
+    } else {
+        Err((
+            StatusCode::UNAUTHORIZED,
+            "Invalid secret token provided in Authorization header",
+        ))
+    }
+}
 
 async fn ping() -> &'static str {
     PING_ANSWER

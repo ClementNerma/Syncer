@@ -10,6 +10,9 @@ pub struct Args {
     #[clap(help = "Address to serve at")]
     pub server_address: SocketAddr,
 
+    #[clap(short, long, help = "Secret password")]
+    pub secret: String,
+
     #[clap(global = true, short, long, help = "Show debug messages")]
     pub verbose: bool,
     // #[clap(global = true, short, long, help = "Show messages datetime")]

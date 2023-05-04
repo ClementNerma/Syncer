@@ -27,6 +27,7 @@ async fn inner_main() -> Result<()> {
         data_dir,
         server_address,
         verbose,
+        secret,
     } = Args::parse();
 
     tracing_subscriber::fmt()
@@ -40,5 +41,5 @@ async fn inner_main() -> Result<()> {
         .compact()
         .init();
 
-    serve(&server_address, PathBuf::from(&data_dir)).await
+    serve(&server_address, secret, PathBuf::from(&data_dir)).await
 }

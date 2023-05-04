@@ -12,6 +12,7 @@ axum = { version = "0.6.17", default-features = false, features = [
     "tokio",
     "json",
     "query",
+    "headers",
 ] }
 clap = { version = "4.2.5", features = ["derive"] }
 futures-util = "0.3.28"

@@ -10,6 +10,9 @@ pub struct Args {
     #[clap(help = "Address of the server to contact")]
     pub address: String,
 
+    #[clap(long, help = "Server's secret password")]
+    pub server_secret: String,
+
     #[clap(
         short,
         long,
