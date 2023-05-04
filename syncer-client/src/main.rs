@@ -160,14 +160,14 @@ async fn inner_main() -> Result<()> {
             let SnapshotFileMetadata {
                 size,
                 last_modif_date,
-                last_modif_date_ns,
+                last_modif_date_ns: _,
             } = new;
 
             if *size != prev.size {
                 return true;
             }
 
-            let truncated_timestamp_diff = last_modif_date.abs_diff(u64::from(*last_modif_date_ns));
+            let truncated_timestamp_diff = last_modif_date.abs_diff(prev.last_modif_date);
             assert!(truncated_timestamp_diff != 0);
 
             if truncated_timestamp_diff <= 1 {
