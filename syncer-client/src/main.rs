@@ -176,7 +176,6 @@ async fn inner_main() -> Result<()> {
             }
 
             let truncated_timestamp_diff = last_modif_date.abs_diff(prev.last_modif_date);
-            assert!(truncated_timestamp_diff != 0);
 
             if truncated_timestamp_diff <= 1 {
                 debug!("Ignoring modified item '{path}' as modification time is no more than 2 seconds.");
