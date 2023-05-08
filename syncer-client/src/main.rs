@@ -335,6 +335,7 @@ async fn inner_main() -> Result<()> {
                 .iter()
                 .map(|(path, DiffItemTypeChanged { prev, new: _ })| (path, prev)),
         )
+        .rev()
         .collect::<Vec<_>>();
 
     let transfer_size = to_transfer.iter().map(|(_, mt)| mt.size).sum();
