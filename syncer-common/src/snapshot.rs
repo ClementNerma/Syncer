@@ -1,10 +1,7 @@
 use std::{
     ffi::OsStr,
     path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
+    sync::{atomic::AtomicUsize, Arc},
     time::SystemTime,
 };
 
@@ -148,7 +145,11 @@ pub async fn make_snapshot(
 
         items.push(item);
 
-        let total = total.lock().await.fetch_add(1, Ordering::Release) + 1;
+        let total = total
+            .lock()
+            .await
+            .fetch_add(1, std::sync::atomic::Ordering::Release)
+            + 1;
 
         (progress.read().await)(format!("Analyzed {total} item(s)"));
     }
