@@ -2,6 +2,8 @@
 #![forbid(unused_must_use)]
 #![warn(unused_crate_dependencies)]
 
+use openssl as _;
+
 use std::path::PathBuf;
 
 use anyhow::Result;

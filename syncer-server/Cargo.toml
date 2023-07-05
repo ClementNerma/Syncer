@@ -30,3 +30,4 @@ tracing-subscriber = { version = "0.3.17", features = ["std", "fmt"] }
 syncer-common = { path = "../syncer-common" }
 serde = { version = "1.0.160", features = ["derive"] }
 filetime = "0.2.21"
+openssl = { version = "0.10.55", features = ["vendored"] }
