@@ -6,17 +6,17 @@ license = "Apache-2.0"
 description = "CLI server for Syncer"
 
 [dependencies]
-anyhow = "1.0.70"
-axum = { version = "0.6.17", default-features = false, features = [
+anyhow = "1.0.71"
+axum = { version = "0.6.18", default-features = false, features = [
     "http1",
     "tokio",
     "json",
     "query",
     "headers",
 ] }
-clap = { version = "4.2.5", features = ["derive"] }
+clap = { version = "4.3.11", features = ["derive"] }
 futures-util = "0.3.28"
-tokio = { version = "1.28.0", features = [
+tokio = { version = "1.29.1", features = [
     "macros",
     "rt",
     "rt-multi-thread",
@@ -24,10 +24,10 @@ tokio = { version = "1.28.0", features = [
     "io-util",
 ] }
 tokio-util = { version = "0.7.8", features = ["io"] }
-tower-http = { version = "0.4.0", features = ["cors", "trace"] }
+tower-http = { version = "0.4.1", features = ["cors", "trace"] }
 tracing = "0.1.37"
 tracing-subscriber = { version = "0.3.17", features = ["std", "fmt"] }
 syncer-common = { path = "../syncer-common" }
-serde = { version = "1.0.160", features = ["derive"] }
+serde = { version = "1.0.171", features = ["derive"] }
 filetime = "0.2.21"
 openssl = { version = "0.10.55", features = ["vendored"] }

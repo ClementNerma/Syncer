@@ -7,15 +7,15 @@ description = "CLI client for Syncer"
 
 [dependencies]
 anyhow = "1.0.71"
-clap = { version = "4.2.5", features = ["derive"] }
-colored = "2.0.0"
+clap = { version = "4.3.11", features = ["derive"] }
+colored = "2.0.4"
 dialoguer = { version = "0.10.4", default-features = false }
 futures-util = { version = "0.3.28", default-features = false }
-indicatif = "0.17.3"
-reqwest = { version = "0.11.17", features = ["json", "stream", "multipart"] }
+indicatif = "0.17.5"
+reqwest = { version = "0.11.18", features = ["json", "stream", "multipart"] }
 syncer-common = { version = "0.1.0", path = "../syncer-common" }
-time = { version = "0.3.20", features = ["formatting"] }
-tokio = { version = "1.28.0", features = [
+time = { version = "0.3.23", features = ["formatting"] }
+tokio = { version = "1.29.1", features = [
     "macros",
     "rt-multi-thread",
     "fs",
