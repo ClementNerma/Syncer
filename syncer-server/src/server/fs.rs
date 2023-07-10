@@ -111,21 +111,37 @@ pub async fn write_file(
         throw_err!(BAD_REQUEST, "Provided path is a directory");
     }
 
-    let mut file = File::create(&path)
+    let tmp_path = path.with_file_name(format!(
+        ".tmp-{last_modification}-{last_modification_ns}-{size}"
+    ));
+
+    let mut tmp_file = File::create(&tmp_path)
         .await
         .map_err(handle_err!(INTERNAL_SERVER_ERROR))?;
 
+    let mut written = 0;
+
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(handle_err!(INTERNAL_SERVER_ERROR))?;
+        written += chunk.len();
 
-        file.write_all(&chunk)
+        tmp_file
+            .write_all(&chunk)
             .await
             .map_err(handle_err!(INTERNAL_SERVER_ERROR))?;
     }
 
-    // TODO: check that size is correct (else remove file)
-    // TODO: write to temporary file (in current filesystem to avoid out of space) before moving to final location
-    // TODO: check if mtime has been correctly written
+    if u64::try_from(written).unwrap() != size {
+        throw_err!(
+            BAD_REQUEST,
+            "Provided size does not match transmitted content"
+        );
+    }
+
+    fs::rename(&tmp_path, &path)
+        .await
+        .context("Failed to rename temporary file to final name")
+        .map_err(handle_err!(INTERNAL_SERVER_ERROR))?;
 
     tokio::task::spawn_blocking(move || {
         filetime::set_file_mtime(
